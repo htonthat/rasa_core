@@ -1,12 +1,13 @@
-import sys
-from collections import defaultdict
-
+import importlib
 import json
 import logging
-import numpy as np
 import os
+import sys
+from collections import defaultdict
 from datetime import datetime
 from typing import Text, Optional, Any, List, Dict, Tuple
+
+import numpy as np
 
 import rasa_core
 from rasa_core import utils, training, constants
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 class PolicyEnsemble(object):
+    versioned_packages = ["rasa_core", "tensorflow", "sklearn"]
+
     def __init__(self,
                  policies: List[Policy],
                  action_fingerprints: Optional[Dict] = None) -> None:
@@ -97,12 +100,22 @@ class PolicyEnsemble(object):
             action_fingerprints[k] = {"slots": slots}
         return action_fingerprints
 
+    def _add_package_version_info(self, metadata: Dict[Text, Any]) -> None:
+        """Adds version info for self.versioned_packages to metadata."""
+
+        for package_name in self.versioned_packages:
+            try:
+                p = importlib.import_module(package_name)
+                metadata[package_name] = p.__version__
+            except ImportError:
+                pass
+
     def _persist_metadata(self,
                           path: Text,
                           dump_flattened_stories: bool = False) -> None:
         """Persists the domain specification to storage."""
 
-        # make sure the directory we persist to exists
+        # make sure the directory we persist exists
         domain_spec_path = os.path.join(path, 'policy_metadata.json')
         training_data_path = os.path.join(path, 'stories.md')
         utils.create_dir_for_file(domain_spec_path)
@@ -117,13 +130,14 @@ class PolicyEnsemble(object):
 
         metadata = {
             "action_fingerprints": action_fingerprints,
-            "rasa_core": rasa_core.__version__,
             "python": ".".join([str(s) for s in sys.version_info[:3]]),
             "max_histories": self._max_histories(),
             "ensemble_name": self.__module__ + "." + self.__class__.__name__,
             "policy_names": policy_names,
             "trained_at": self.date_trained
         }
+
+        self._add_package_version_info(metadata)
 
         utils.dump_obj_as_json_to_file(domain_spec_path, metadata)
 
@@ -132,7 +146,8 @@ class PolicyEnsemble(object):
         if dump_flattened_stories:
             training.persist_data(self.training_trackers, training_data_path)
 
-    def persist(self, path: Text, dump_flattened_stories: bool = False) -> None:
+    def persist(self, path: Text,
+                dump_flattened_stories: bool = False) -> None:
         """Persists the policy to storage."""
 
         self._persist_metadata(path, dump_flattened_stories)
@@ -169,6 +184,18 @@ class PolicyEnsemble(object):
                 model_version)
 
     @classmethod
+    def _ensure_loaded_policy(cls, policy, policy_cls, policy_name: Text):
+        if policy is None:
+            raise Exception(
+                "Failed to load policy {}: "
+                "load returned None".format(policy_name))
+        elif not isinstance(policy, policy_cls):
+            raise Exception(
+                "Failed to load policy {}: "
+                "load returned object that is not instance of its own class"
+                "".format(policy_name))
+
+    @classmethod
     def load(cls, path: Text) -> 'PolicyEnsemble':
         """Loads policy and domain specification from storage"""
 
@@ -180,6 +207,7 @@ class PolicyEnsemble(object):
             dir_name = 'policy_{}_{}'.format(i, policy_cls.__name__)
             policy_path = os.path.join(path, dir_name)
             policy = policy_cls.load(policy_path)
+            cls._ensure_loaded_policy(policy, policy_cls, policy_name)
             policies.append(policy)
         ensemble_cls = utils.class_from_module_path(
             metadata["ensemble_name"])
